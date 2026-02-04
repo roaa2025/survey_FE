@@ -12,7 +12,12 @@ import {
   useGenerateSurvey,
   useGenerateSurveyFast,
   useRephrasePrompt,
+  useCreateSurveyPlan,
+  useApproveSurveyPlan,
+  useRejectSurveyPlan,
 } from "@/hooks/use-surveys";
+import { SurveyPlanResponse } from "@shared/routes";
+import { getSurveyPlan, generateValidateFixQuestions } from "@/lib/plannerBackend";
 import { Stepper } from "@/components/Stepper";
 import { HistorySidebar } from "@/components/HistorySidebar";
 import { CollectionModeCard } from "@/components/CollectionModeCard";
@@ -56,9 +61,10 @@ export default function ConfigPage() {
   const [numPages, setNumPages] = useState(1);
   const [reviewPlan, setReviewPlan] = useState(true);
   const [blueprint, setBlueprint] = useState<any>(null);
+  const [threadId, setThreadId] = useState<string | null>(null);
   /**
    * Toggle behavior:
-   * - ON  => use the app's built-in AI endpoint (`/api/ai/generate`)
+   * - ON  => use the planner API (POST to create plan, then GET to retrieve it)
    * - OFF => call the external backend endpoint (Anomaly) that you provided
    *
    * Important: We keep the textarea always editable.
@@ -72,6 +78,9 @@ export default function ConfigPage() {
   const generateSurvey = useGenerateSurvey();
   const generateSurveyFast = useGenerateSurveyFast();
   const rephrasePrompt = useRephrasePrompt();
+  const createSurveyPlan = useCreateSurveyPlan();
+  const approveSurveyPlan = useApproveSurveyPlan();
+  const rejectSurveyPlan = useRejectSurveyPlan();
 
   const form = useForm<z.infer<typeof metadataSchema>>({
     resolver: zodResolver(metadataSchema),
@@ -127,79 +136,263 @@ export default function ConfigPage() {
 
     try {
       const formValues = form.getValues();
-      const request = {
-        prompt: aiPrompt,
-        numQuestions,
-        numPages,
-        language: formValues.language,
-        // Include title and type for external backend (required fields)
-        title: formValues.name,
-        type: formValues.type,
-      } as const;
+      
+      if (isPromptEnabled) {
+        // Toggle ON: Use planner API (POST then GET)
+        const createRequest = {
+          prompt: aiPrompt,
+          title: formValues.name,
+          type: formValues.type,
+          language: formValues.language,
+          numQuestions,
+          numPages,
+        };
 
-      // Requirement: if the toggle is NOT activated, call the external backend.
-      const plan = isPromptEnabled
-        ? await generateSurvey.mutateAsync(request)
-        : await generateSurveyFast.mutateAsync(request);
+        // Step 1: Create the plan and get thread_id
+        console.log("🔵 Creating survey plan with planner API...");
+        const createResponse = await createSurveyPlan.mutateAsync(createRequest);
+        const newThreadId = createResponse.thread_id;
+        console.log("✅ Plan created, thread_id:", newThreadId);
 
-      console.log("📋 Received plan from backend:", plan);
-      console.log("📋 Plan sections:", plan?.sections);
-      console.log("📋 Plan sections length:", plan?.sections?.length);
+        // Step 2: Retrieve the full plan
+        setThreadId(newThreadId);
+        // Call the backend function directly
+        const planResponse = await getSurveyPlan(newThreadId);
+        console.log("📋 Received plan from planner API:", planResponse);
+        console.log("📋 Plan pages:", planResponse?.plan?.pages);
+        console.log("📋 Approval status:", planResponse?.approval_status);
 
-      // Validate that plan has the expected structure
-      if (!plan || !plan.sections || !Array.isArray(plan.sections) || plan.sections.length === 0) {
-        console.error("❌ Invalid plan structure received:", plan);
-        throw new Error("The generated plan does not have the expected structure. Please try again.");
-      }
-
-      if (reviewPlan) {
-        setBlueprint(plan);
-        setCurrentStep("blueprint");
-      } else {
-        // Direct save and proceed
-        try {
-          await updateSurvey.mutateAsync({ 
-            id: currentSurveyId, 
-            structure: plan 
-          });
-        } catch (updateError) {
-          // If update fails, continue anyway in frontend-only mode
-          console.warn("Survey update failed, continuing in frontend-only mode:", updateError);
+        // Validate that plan has the expected structure
+        if (!planResponse || !planResponse.plan || !planResponse.plan.pages || !Array.isArray(planResponse.plan.pages) || planResponse.plan.pages.length === 0) {
+          console.error("❌ Invalid plan structure received:", planResponse);
+          throw new Error("The generated plan does not have the expected structure. Please try again.");
         }
-        // Store structure in localStorage as fallback for mock mode
-        if (currentSurveyId) {
+
+        if (reviewPlan) {
+          // Store the full planner response
+          console.log("✅ Setting blueprint and moving to review step");
+          console.log("📋 Blueprint data:", planResponse);
+          setBlueprint(planResponse);
+          setCurrentStep("blueprint");
+          console.log("✅ Step changed to blueprint");
+        } else {
+          // Direct save and proceed
+          // Transform planner response to sections format for backward compatibility
+          const transformedPlan = {
+            sections: planResponse.plan.pages.map((page, idx) => ({
+              title: page.name || `Section ${idx + 1}`,
+              questions: page.question_specs.map((spec) => ({
+                text: spec.intent,
+                type: spec.question_type,
+                options: spec.options_hint && spec.options_hint.length > 0 ? spec.options_hint : undefined,
+              })),
+            })),
+            suggestedName: planResponse.plan.title,
+          };
+
           try {
-            localStorage.setItem(`survey_${currentSurveyId}_structure`, JSON.stringify(plan));
-          } catch (e) {
-            console.warn("Failed to save to localStorage:", e);
+            await updateSurvey.mutateAsync({ 
+              id: currentSurveyId, 
+              structure: transformedPlan 
+            });
+          } catch (updateError) {
+            console.warn("Survey update failed, continuing in frontend-only mode:", updateError);
           }
+          // Store structure in localStorage as fallback for mock mode
+          if (currentSurveyId) {
+            try {
+              localStorage.setItem(`survey_${currentSurveyId}_structure`, JSON.stringify(transformedPlan));
+            } catch (e) {
+              console.warn("Failed to save to localStorage:", e);
+            }
+          }
+          setLocation(`/builder/${currentSurveyId}`);
         }
-        setLocation(`/builder/${currentSurveyId}`);
+      } else {
+        // Toggle OFF: Use existing external backend (Anomaly)
+        const request = {
+          prompt: aiPrompt,
+          numQuestions,
+          numPages,
+          language: formValues.language,
+          // Include title and type for external backend (required fields)
+          title: formValues.name,
+          type: formValues.type,
+        } as const;
+
+        const plan = await generateSurveyFast.mutateAsync(request);
+
+        console.log("📋 Received plan from backend:", plan);
+        console.log("📋 Plan sections:", plan?.sections);
+        console.log("📋 Plan sections length:", plan?.sections?.length);
+
+        // Validate that plan has the expected structure
+        if (!plan || !plan.sections || !Array.isArray(plan.sections) || plan.sections.length === 0) {
+          console.error("❌ Invalid plan structure received:", plan);
+          throw new Error("The generated plan does not have the expected structure. Please try again.");
+        }
+
+        if (reviewPlan) {
+          setBlueprint(plan);
+          setCurrentStep("blueprint");
+        } else {
+          // Direct save and proceed
+          try {
+            await updateSurvey.mutateAsync({ 
+              id: currentSurveyId, 
+              structure: plan 
+            });
+          } catch (updateError) {
+            // If update fails, continue anyway in frontend-only mode
+            console.warn("Survey update failed, continuing in frontend-only mode:", updateError);
+          }
+          // Store structure in localStorage as fallback for mock mode
+          if (currentSurveyId) {
+            try {
+              localStorage.setItem(`survey_${currentSurveyId}_structure`, JSON.stringify(plan));
+            } catch (e) {
+              console.warn("Failed to save to localStorage:", e);
+            }
+          }
+          setLocation(`/builder/${currentSurveyId}`);
+        }
       }
     } catch (err) {
       // Error handled by hook toast
+      console.error("❌ Error in handleGenerate:", err);
     }
   };
 
-  const handleRephrase = async () => {
-    if (!aiPrompt) return;
-    const result = await rephrasePrompt.mutateAsync({
-      prompt: aiPrompt,
-      language: form.getValues("language")
-    });
-    setAiPrompt(result.rephrased);
-    setShowRephraseDialog(false);
+  /**
+   * Handle the rephrase button click - opens dialog and triggers API call
+   */
+  const handleRephraseClick = async () => {
+    if (!aiPrompt.trim()) {
+      // Show error if prompt is empty
+      return;
+    }
+    // Open dialog first
+    setShowRephraseDialog(true);
+    // Trigger the API call
+    try {
+      await rephrasePrompt.mutateAsync({
+        prompt: aiPrompt,
+        language: form.getValues("language")
+      });
+    } catch (error) {
+      // Error is handled by the hook's onError handler
+      console.error("Rephrase failed:", error);
+    }
+  };
+
+  /**
+   * Apply the rewritten prompt to the textarea
+   */
+  const handleApplyRephrase = () => {
+    if (rephrasePrompt.data?.rewritten_prompt || rephrasePrompt.data?.rephrased) {
+      // Use rewritten_prompt if available, otherwise fall back to rephrased for compatibility
+      setAiPrompt(rephrasePrompt.data.rewritten_prompt || rephrasePrompt.data.rephrased);
+      setShowRephraseDialog(false);
+    }
+  };
+
+  /**
+   * Type guard to check if plan is from planner API
+   */
+  const isPlannerResponse = (plan: any): plan is SurveyPlanResponse => {
+    return plan && 'plan' in plan && 'approval_status' in plan && 'thread_id' in plan;
   };
 
   const handleBlueprintApprove = async () => {
-    if (surveyId && blueprint) {
+    if (!surveyId || !blueprint) return;
+
+    // Check if blueprint is from planner API (has thread_id)
+    if (isPlannerResponse(blueprint) && threadId) {
+      try {
+        // Call approve API endpoint
+        console.log("🔵 Approving survey plan with planner API...", threadId);
+        const approvedPlan = await approveSurveyPlan.mutateAsync(threadId);
+        console.log("✅ Plan approved, received response:", approvedPlan);
+
+        // Update blueprint state with approved plan (includes generated_questions)
+        setBlueprint(approvedPlan);
+
+        // Call generate-validate-fix endpoint after approval succeeds
+        try {
+          console.log("🔵 Calling generate-validate-fix endpoint...", threadId);
+          const generateResult = await generateValidateFixQuestions(threadId, true);
+          console.log("✅ Generate-validate-fix completed:", generateResult);
+          
+          // Log validation results if available
+          if (generateResult.validation) {
+            console.log(`📊 Validation: ${generateResult.validation.passed ? 'PASSED' : 'FAILED'}, Issues: ${generateResult.validation.issue_count}`);
+            if (generateResult.validation.issues && generateResult.validation.issues.length > 0) {
+              console.log("⚠️ Validation issues:", generateResult.validation.issues);
+            }
+          }
+          
+          // Log save status
+          if (generateResult.saved !== undefined) {
+            console.log(`💾 Questions saved to database: ${generateResult.saved}`);
+          }
+          
+          // Log total questions generated
+          const totalQuestions = generateResult.rendered_pages.reduce(
+            (sum, page) => sum + page.questions.length,
+            0
+          );
+          console.log(`📝 Total questions generated: ${totalQuestions} across ${generateResult.rendered_pages.length} pages`);
+        } catch (generateError) {
+          // Log error but don't break the approval flow
+          console.warn("⚠️ Generate-validate-fix failed, but approval succeeded:", generateError);
+          // Continue with the flow even if generate-validate-fix fails
+        }
+
+        // Transform planner response to sections format for backward compatibility
+        const transformedPlan = {
+          sections: approvedPlan.plan.pages.map((page, idx) => ({
+            title: page.name || `Section ${idx + 1}`,
+            questions: page.question_specs.map((spec) => ({
+              text: spec.intent,
+              type: spec.question_type,
+              options: spec.options_hint && spec.options_hint.length > 0 ? spec.options_hint : undefined,
+            })),
+          })),
+          suggestedName: approvedPlan.plan.title,
+        };
+
+        // Save to survey structure
+        try {
+          await updateSurvey.mutateAsync({ 
+            id: surveyId, 
+            structure: transformedPlan 
+          });
+        } catch (updateError) {
+          console.warn("Survey update failed, continuing in frontend-only mode:", updateError);
+        }
+
+        // Store structure in localStorage as fallback for mock mode
+        try {
+          localStorage.setItem(`survey_${surveyId}_structure`, JSON.stringify(transformedPlan));
+        } catch (e) {
+          console.warn("Failed to save to localStorage:", e);
+        }
+
+        // Navigate to builder
+        setLocation(`/builder/${surveyId}`);
+      } catch (error) {
+        // Error is handled by the hook's onError handler (toast notification)
+        console.error("❌ Error approving plan:", error);
+        // Don't navigate on error - let user see the error and try again
+      }
+    } else {
+      // Legacy mode: handle non-planner plans
       try {
         await updateSurvey.mutateAsync({ 
           id: surveyId, 
           structure: blueprint 
         });
       } catch (updateError) {
-        // If update fails, continue anyway in frontend-only mode
         console.warn("Survey update failed, continuing in frontend-only mode:", updateError);
       }
       // Store structure in localStorage as fallback for mock mode
@@ -211,6 +404,36 @@ export default function ConfigPage() {
         }
       }
       setLocation(`/builder/${surveyId}`);
+    }
+  };
+
+  const handleBlueprintReject = async (feedback: string) => {
+    if (!threadId) {
+      console.error("❌ Cannot reject plan: threadId is missing");
+      return;
+    }
+
+    try {
+      // Call reject API endpoint
+      console.log("🔵 Rejecting survey plan with planner API...", threadId, feedback);
+      const rejectedPlan = await rejectSurveyPlan.mutateAsync({ thread_id: threadId, feedback });
+      console.log("✅ Plan rejected, received response:", rejectedPlan);
+
+      // Update blueprint state with regenerated plan
+      setBlueprint(rejectedPlan);
+
+      // The plan will be automatically refreshed in the UI since we updated the blueprint state
+      // The approval_status should now be "awaiting_approval" if regeneration was successful
+    } catch (error: any) {
+      // Check for MAX_PLAN_ATTEMPTS_REACHED error
+      if (error.message && error.message.includes("Maximum attempts")) {
+        // Error toast is already shown by the hook
+        // Keep the current plan visible so user can see it
+        console.error("❌ Max attempts reached, cannot regenerate plan");
+      } else {
+        // Other errors are handled by the hook's onError handler
+        console.error("❌ Error rejecting plan:", error);
+      }
     }
   };
 
@@ -406,12 +629,13 @@ export default function ConfigPage() {
                           variant="ghost" 
                           size="sm" 
                           className="text-primary hover:text-primary/80 hover:bg-primary/5"
-                          onClick={() => setShowRephraseDialog(true)}
+                          onClick={handleRephraseClick}
                           // Smart rephrase uses the built-in AI flow.
                           // When the toggle is OFF, we are using the external backend and we disable this.
-                          disabled={!isPromptEnabled}
+                          disabled={!isPromptEnabled || !aiPrompt.trim() || rephrasePrompt.isPending}
                         >
-                          <RefreshCw className="w-4 h-4 mr-2" /> Smart Rephrase
+                          <RefreshCw className={`w-4 h-4 mr-2 ${rephrasePrompt.isPending ? 'animate-spin' : ''}`} /> 
+                          {rephrasePrompt.isPending ? 'Rephrasing...' : 'Smart Rephrase'}
                         </Button>
                       </label>
                       {/* Textarea container with toggle inside */}
@@ -453,17 +677,17 @@ export default function ConfigPage() {
                   </div>
 
                   {/* Sidebar Controls */}
-                  <div className="md:col-span-4 space-y-6">
+                  <div className="md:col-span-4 space-y-6 relative z-10">
                     <Button 
-                      className="w-full btn-primary py-6 text-lg shadow-xl shadow-primary/20" 
+                      className="w-full btn-primary py-6 text-lg shadow-xl shadow-primary/20 cursor-pointer relative z-10" 
                       onClick={handleGenerate}
                       disabled={
-                        generateSurvey.isPending ||
-                        generateSurveyFast.isPending ||
-                        !aiPrompt.length
+                        (isPromptEnabled ? createSurveyPlan.isPending : generateSurveyFast.isPending) ||
+                        !aiPrompt.trim().length
                       }
+                      type="button"
                     >
-                      {(isPromptEnabled ? generateSurvey.isPending : generateSurveyFast.isPending) ? (
+                      {(isPromptEnabled ? createSurveyPlan.isPending : generateSurveyFast.isPending) ? (
                         <>Generating <span className="animate-pulse">...</span></>
                       ) : (
                         <>Generate <Wand2 className="ml-2 w-5 h-5" /></>
@@ -480,6 +704,9 @@ export default function ConfigPage() {
                 plan={blueprint}
                 onApprove={handleBlueprintApprove}
                 onRetry={() => setCurrentStep("ai-config")}
+                onReject={isPlannerResponse(blueprint) && threadId ? handleBlueprintReject : undefined}
+                threadId={threadId || undefined}
+                isRejecting={rejectSurveyPlan.isPending}
               />
             )}
 
@@ -490,35 +717,66 @@ export default function ConfigPage() {
       {/* Right Sidebar - History */}
       <HistorySidebar />
 
-      {/* Rephrase Dialog */}
+      {/* Rephrase Dialog - Shows original vs rewritten prompt with notes */}
       <Dialog open={showRephraseDialog} onOpenChange={setShowRephraseDialog}>
-        <DialogContent>
+        <DialogContent className="max-w-3xl">
           <DialogHeader>
             <DialogTitle>Smart Rephrase</DialogTitle>
           </DialogHeader>
           <div className="space-y-4 py-4">
+            {/* Original Prompt Section */}
             <div className="p-4 bg-muted/50 rounded-lg">
-              <p className="text-sm text-muted-foreground mb-1">Original:</p>
-              <p>{aiPrompt || "No prompt entered yet."}</p>
+              <p className="text-sm text-muted-foreground mb-2 font-semibold">Original Prompt:</p>
+              <p className="text-base">{aiPrompt || "No prompt entered yet."}</p>
             </div>
+            
+            {/* Loading State */}
             {rephrasePrompt.isPending ? (
-              <div className="flex justify-center p-8 text-primary">Rephrasing...</div>
+              <div className="flex flex-col items-center justify-center p-8 text-primary">
+                <RefreshCw className="w-6 h-6 animate-spin mb-2" />
+                <p>Rephrasing your prompt...</p>
+              </div>
+            ) : rephrasePrompt.data ? (
+              <>
+                {/* Rewritten Prompt Section */}
+                <div className="p-4 bg-primary/5 border border-primary/20 rounded-lg">
+                  <div className="flex justify-between items-center mb-2">
+                    <p className="text-sm text-primary font-bold">Rewritten Prompt:</p>
+                    <Badge variant="outline" className="text-primary border-primary">AI Enhanced</Badge>
+                  </div>
+                  <p className="text-base">
+                    {rephrasePrompt.data.rewritten_prompt || rephrasePrompt.data.rephrased || aiPrompt}
+                  </p>
+                </div>
+                
+                {/* Rewrite Notes Section - Show if available */}
+                {rephrasePrompt.data.rewrite_notes && rephrasePrompt.data.rewrite_notes.length > 0 && (
+                  <div className="p-4 bg-blue-50 border border-blue-200 rounded-lg">
+                    <p className="text-sm text-blue-900 font-semibold mb-2">Improvements Made:</p>
+                    <ul className="list-disc list-inside space-y-1">
+                      {rephrasePrompt.data.rewrite_notes.map((note: string, index: number) => (
+                        <li key={index} className="text-sm text-blue-800">{note}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </>
             ) : (
               <div className="p-4 bg-primary/5 border border-primary/20 rounded-lg">
-                <div className="flex justify-between items-center mb-1">
-                  <p className="text-sm text-primary font-bold">Suggested:</p>
-                  <Badge variant="outline" className="text-primary border-primary">AI Enhanced</Badge>
-                </div>
-                <p>
-                  {rephrasePrompt.data?.rephrased || "Click 'Rephrase' to improve your prompt for better AI results."}
+                <p className="text-sm text-muted-foreground">
+                  Click 'Smart Rephrase' to improve your prompt for better AI results.
                 </p>
               </div>
             )}
           </div>
           <DialogFooter>
             <Button variant="ghost" onClick={() => setShowRephraseDialog(false)}>Cancel</Button>
-            <Button onClick={handleRephrase} disabled={rephrasePrompt.isPending}>
-              Apply Suggestion
+            <Button 
+              onClick={handleApplyRephrase} 
+              disabled={rephrasePrompt.isPending || !rephrasePrompt.data}
+              className="btn-primary"
+            >
+              Use This Version
             </Button>
           </DialogFooter>
         </DialogContent>

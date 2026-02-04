@@ -1,5 +1,6 @@
 import type { Express } from "express";
 import type { Server } from "http";
+import { randomUUID } from "crypto";
 import { storage } from "./storage";
 import { api } from "@shared/routes";
 import { z } from "zod";
@@ -213,6 +214,150 @@ export async function registerRoutes(
         message: "Failed to rephrase prompt",
         error: errorMessage 
       });
+    }
+  });
+
+  // === Prompt Rewrite Endpoint (New API) ===
+  // This endpoint matches the FastAPI specification: POST /api/upsert-survey/prompt/rewrite
+  app.post("/api/upsert-survey/prompt/rewrite", async (req, res) => {
+    console.log("📥 Received prompt rewrite request");
+    try {
+      // Extract and validate request body
+      const { prompt, language = "en", mode = "paraphrase", meta } = req.body;
+      
+      // Validate required fields
+      if (!prompt || typeof prompt !== "string" || prompt.trim().length === 0) {
+        return res.status(400).json({
+          original_prompt: "",
+          rewritten_prompt: "",
+          rewrite_notes: [],
+          status: {
+            code: "error",
+            message: "Prompt is required and must be a non-empty string"
+          },
+          meta: {
+          run_id: meta?.run_id || randomUUID(),
+          timestamp: new Date().toISOString(),
+          trace_id: meta?.trace_id
+          }
+        });
+      }
+
+      if (!openai) {
+        return res.status(503).json({
+          original_prompt: prompt,
+          rewritten_prompt: "",
+          rewrite_notes: [],
+          status: {
+            code: "error",
+            message: "OpenAI is not configured"
+          },
+          meta: {
+          run_id: meta?.run_id || randomUUID(),
+          timestamp: new Date().toISOString(),
+          trace_id: meta?.trace_id
+          }
+        });
+      }
+
+      // Generate run_id and trace_id if not provided
+      const runId = meta?.run_id || randomUUID();
+      const traceId = meta?.trace_id || randomUUID();
+      const timestamp = new Date().toISOString();
+
+      // Create system prompt for professional rewriting
+      const systemPrompt = `You are a professional editor specializing in survey design. 
+Your task is to rewrite the user's survey prompt to improve clarity, professionalism, and effectiveness while:
+- Preserving ALL constraints, numbers, and specific requirements
+- Maintaining the original intent and meaning
+- Improving grammar, structure, and clarity
+- Making it more professional and actionable
+
+Return JSON with this structure:
+{
+  "rewritten_prompt": "the improved version",
+  "rewrite_notes": ["note 1", "note 2", ...]
+}
+
+The rewrite_notes should be a list of strings describing what improvements were made.`;
+
+      const userPrompt = `Language: ${language}\nMode: ${mode}\nOriginal Prompt: ${prompt}`;
+
+      // Call OpenAI API
+      const response = await openai.chat.completions.create({
+        model: "gpt-4.1-mini",
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userPrompt }
+        ],
+        response_format: { type: "json_object" }
+      });
+
+      const content = response.choices[0].message.content;
+      if (!content) {
+        throw new Error("No content generated from OpenAI");
+      }
+
+      // Parse the AI response
+      const aiResult = JSON.parse(content);
+      const rewrittenPrompt = aiResult.rewritten_prompt || prompt;
+      const rewriteNotes = Array.isArray(aiResult.rewrite_notes) 
+        ? aiResult.rewrite_notes 
+        : (aiResult.rewrite_notes ? [String(aiResult.rewrite_notes)] : []);
+
+      // Extract token usage if available
+      const tokenUsage = response.usage ? {
+        input_tokens: response.usage.prompt_tokens,
+        output_tokens: response.usage.completion_tokens,
+        total_tokens: response.usage.total_tokens
+      } : undefined;
+
+      // Build response matching the API specification
+      const responseData = {
+        original_prompt: prompt,
+        rewritten_prompt: rewrittenPrompt,
+        rewrite_notes: rewriteNotes,
+        status: {
+          code: "success",
+          message: "Prompt rewritten successfully"
+        },
+        meta: {
+          run_id: runId,
+          timestamp: timestamp,
+          trace_id: traceId,
+          ...(response.model && {
+            model_info: {
+              name: response.model,
+              version: "1.0",
+              ...(tokenUsage && { token_usage: tokenUsage })
+            }
+          })
+        }
+      };
+
+      console.log("✅ Prompt rewrite successful");
+      res.json(responseData);
+
+    } catch (err) {
+      console.error("❌ Prompt Rewrite Error:", err);
+      
+      // Build error response matching the API specification
+      const errorResponse = {
+        original_prompt: req.body?.prompt || "",
+        rewritten_prompt: "",
+        rewrite_notes: [],
+        status: {
+          code: "error",
+          message: err instanceof Error ? err.message : "Failed to rewrite prompt. Please try again."
+        },
+        meta: {
+          run_id: req.body?.meta?.run_id || crypto.randomUUID(),
+          timestamp: new Date().toISOString(),
+          trace_id: req.body?.meta?.trace_id
+        }
+      };
+
+      res.status(500).json(errorResponse);
     }
   });
 

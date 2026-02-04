@@ -1,5 +1,5 @@
-import { useRoute, useLocation } from "wouter";
-import { ArrowLeft, RotateCcw } from "lucide-react";
+import { useRoute } from "wouter";
+import { ArrowLeft } from "lucide-react";
 import { Link } from "wouter";
 import { Button } from "@/components/ui/button";
 import { HistorySidebar } from "@/components/HistorySidebar";
@@ -22,7 +22,6 @@ import {
  */
 export default function BuilderPage() {
   const [, params] = useRoute("/builder/:id");
-  const [, setLocation] = useLocation();
   const surveyId = params?.id ? Number(params.id) : null;
   
   // Fetch survey data
@@ -45,11 +44,6 @@ export default function BuilderPage() {
 
   // Calculate total questions across all sections
   const totalQuestions = sections.reduce((sum, section) => sum + section.questions.length, 0);
-
-  // Handle regenerate - navigate back to config page
-  const handleRegenerate = () => {
-    setLocation("/config");
-  };
 
   return (
     <div className="min-h-screen bg-[#F5F7FA] flex font-sans">
@@ -82,25 +76,16 @@ export default function BuilderPage() {
               </BreadcrumbList>
             </Breadcrumb>
 
-            {/* Title and Regenerate Button */}
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-4">
-                <Link href="/config">
-                  <Button variant="ghost" size="sm">
-                    <ArrowLeft className="w-4 h-4 mr-2" /> Back
-                  </Button>
-                </Link>
-                <h1 className="text-2xl font-display font-bold text-secondary">
-                  Generated Survey Questions
-                </h1>
-              </div>
-              <Button
-                variant="outline"
-                onClick={handleRegenerate}
-                className="gap-2"
-              >
-                <RotateCcw className="w-4 h-4" /> Regenerate
-              </Button>
+            {/* Title */}
+            <div className="flex items-center gap-4">
+              <Link href="/config">
+                <Button variant="ghost" size="sm">
+                  <ArrowLeft className="w-4 h-4 mr-2" /> Back
+                </Button>
+              </Link>
+              <h1 className="text-2xl font-display font-bold text-secondary">
+                Generated Survey Questions
+              </h1>
             </div>
           </div>
         </header>
