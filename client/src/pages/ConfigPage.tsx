@@ -6,7 +6,13 @@ import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 
-import { useCreateSurvey, useUpdateSurvey, useGenerateSurvey, useRephrasePrompt } from "@/hooks/use-surveys";
+import {
+  useCreateSurvey,
+  useUpdateSurvey,
+  useGenerateSurvey,
+  useGenerateSurveyFast,
+  useRephrasePrompt,
+} from "@/hooks/use-surveys";
 import { Stepper } from "@/components/Stepper";
 import { HistorySidebar } from "@/components/HistorySidebar";
 import { CollectionModeCard } from "@/components/CollectionModeCard";
@@ -19,6 +25,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
 import { Switch } from "@/components/ui/switch";
 import { Badge } from "@/components/ui/badge";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
   Dialog,
   DialogContent,
@@ -30,6 +37,7 @@ import {
 // Form schemas
 const metadataSchema = z.object({
   name: z.string().min(3, "Name must be at least 3 characters"),
+  type: z.string().min(1, "Type is required"),
   language: z.enum(["English", "Arabic", "Bilingual"]),
   collectionMode: z.enum(["field", "web"]),
 });
@@ -48,18 +56,28 @@ export default function ConfigPage() {
   const [numPages, setNumPages] = useState(1);
   const [reviewPlan, setReviewPlan] = useState(true);
   const [blueprint, setBlueprint] = useState<any>(null);
-  const [isPromptEnabled, setIsPromptEnabled] = useState(true); // Toggle state for textarea
+  /**
+   * Toggle behavior:
+   * - ON  => use the app's built-in AI endpoint (`/api/ai/generate`)
+   * - OFF => call the external backend endpoint (Anomaly) that you provided
+   *
+   * Important: We keep the textarea always editable.
+   * The toggle only controls which backend we call on "Generate".
+   */
+  const [isPromptEnabled, setIsPromptEnabled] = useState(true);
 
   // Hooks
   const createSurvey = useCreateSurvey();
   const updateSurvey = useUpdateSurvey();
   const generateSurvey = useGenerateSurvey();
+  const generateSurveyFast = useGenerateSurveyFast();
   const rephrasePrompt = useRephrasePrompt();
 
   const form = useForm<z.infer<typeof metadataSchema>>({
     resolver: zodResolver(metadataSchema),
     defaultValues: {
       name: "",
+      type: "",
       language: "English",
       collectionMode: "web",
     },
@@ -108,12 +126,31 @@ export default function ConfigPage() {
     }
 
     try {
-      const plan = await generateSurvey.mutateAsync({
+      const formValues = form.getValues();
+      const request = {
         prompt: aiPrompt,
         numQuestions,
         numPages,
-        language: form.getValues("language")
-      });
+        language: formValues.language,
+        // Include title and type for external backend (required fields)
+        title: formValues.name,
+        type: formValues.type,
+      } as const;
+
+      // Requirement: if the toggle is NOT activated, call the external backend.
+      const plan = isPromptEnabled
+        ? await generateSurvey.mutateAsync(request)
+        : await generateSurveyFast.mutateAsync(request);
+
+      console.log("📋 Received plan from backend:", plan);
+      console.log("📋 Plan sections:", plan?.sections);
+      console.log("📋 Plan sections length:", plan?.sections?.length);
+
+      // Validate that plan has the expected structure
+      if (!plan || !plan.sections || !Array.isArray(plan.sections) || plan.sections.length === 0) {
+        console.error("❌ Invalid plan structure received:", plan);
+        throw new Error("The generated plan does not have the expected structure. Please try again.");
+      }
 
       if (reviewPlan) {
         setBlueprint(plan);
@@ -240,6 +277,33 @@ export default function ConfigPage() {
                       )}
                     />
 
+                    {/* Survey Type */}
+                    <FormField
+                      control={form.control}
+                      name="type"
+                      render={({ field }) => (
+                        <FormItem>
+                          <FormLabel className="text-lg font-semibold text-secondary">Survey Type</FormLabel>
+                          <Select onValueChange={field.onChange} defaultValue={field.value} value={field.value}>
+                            <FormControl>
+                              <SelectTrigger className="text-lg h-12">
+                                <SelectValue placeholder="Select a survey type" />
+                              </SelectTrigger>
+                            </FormControl>
+                            <SelectContent>
+                              <SelectItem value="customer_feedback">Customer Feedback</SelectItem>
+                              <SelectItem value="employee_satisfaction">Employee Satisfaction</SelectItem>
+                              <SelectItem value="market_research">Market Research</SelectItem>
+                              <SelectItem value="product_feedback">Product Feedback</SelectItem>
+                              <SelectItem value="event_feedback">Event Feedback</SelectItem>
+                              <SelectItem value="general">General Survey</SelectItem>
+                            </SelectContent>
+                          </Select>
+                          <FormMessage />
+                        </FormItem>
+                      )}
+                    />
+
                     {/* Language Selection */}
                     <FormField
                       control={form.control}
@@ -343,6 +407,8 @@ export default function ConfigPage() {
                           size="sm" 
                           className="text-primary hover:text-primary/80 hover:bg-primary/5"
                           onClick={() => setShowRephraseDialog(true)}
+                          // Smart rephrase uses the built-in AI flow.
+                          // When the toggle is OFF, we are using the external backend and we disable this.
                           disabled={!isPromptEnabled}
                         >
                           <RefreshCw className="w-4 h-4 mr-2" /> Smart Rephrase
@@ -355,7 +421,6 @@ export default function ConfigPage() {
                           className="min-h-[160px] text-lg p-6 rounded-xl border-border bg-white shadow-sm resize-none focus:ring-2 focus:ring-primary/20"
                           value={aiPrompt}
                           onChange={(e) => setAiPrompt(e.target.value)}
-                          disabled={!isPromptEnabled}
                         />
                         {/* Toggle switch positioned inside textarea area at the bottom */}
                         <div className="absolute bottom-4 right-4">
@@ -392,9 +457,13 @@ export default function ConfigPage() {
                     <Button 
                       className="w-full btn-primary py-6 text-lg shadow-xl shadow-primary/20" 
                       onClick={handleGenerate}
-                      disabled={generateSurvey.isPending || !aiPrompt.length}
+                      disabled={
+                        generateSurvey.isPending ||
+                        generateSurveyFast.isPending ||
+                        !aiPrompt.length
+                      }
                     >
-                      {generateSurvey.isPending ? (
+                      {(isPromptEnabled ? generateSurvey.isPending : generateSurveyFast.isPending) ? (
                         <>Generating <span className="animate-pulse">...</span></>
                       ) : (
                         <>Generate <Wand2 className="ml-2 w-5 h-5" /></>

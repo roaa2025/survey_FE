@@ -1,6 +1,13 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { api, buildUrl, type CreateSurveyRequest, type UpdateSurveyRequest, type GenerateSurveyRequest } from "@shared/routes";
+import {
+  api,
+  buildUrl,
+  type CreateSurveyRequest,
+  type UpdateSurveyRequest,
+  type GenerateSurveyRequest,
+} from "@shared/routes";
 import { useToast } from "@/hooks/use-toast";
+import { postSurveyPlanFast } from "@/lib/anomalyBackend";
 
 // ============================================
 // SURVEY HOOKS
@@ -328,18 +335,31 @@ export function useGenerateSurvey() {
   
   return useMutation({
     mutationFn: async (data: GenerateSurveyRequest) => {
+      // Construct the full URL - use relative path which will work with same-origin requests
+      // If the frontend is served from the same server, this will resolve correctly
+      const url = api.ai.generate.path;
+      console.log("🔵 Calling built-in AI endpoint:", url, data);
+      
       try {
-        const res = await fetch(api.ai.generate.path, {
+        const res = await fetch(url, {
           method: api.ai.generate.method,
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(data),
+          credentials: 'include', // Include cookies for same-origin requests
         });
+        console.log("🔵 Response status:", res.status, res.statusText);
         
         if (!res.ok) {
           // If API fails, use mock data as fallback
           try {
             const errorText = await res.text();
             console.warn("AI Generation API failed, using mock data:", errorText);
+            // Show a warning toast but don't fail the mutation
+            toast({ 
+              title: "AI Generation unavailable", 
+              description: "Using fallback data. Check server logs for details.",
+              variant: "default"
+            });
           } catch {
             console.warn("AI Generation API failed (could not read error), using mock data");
           }
@@ -357,12 +377,54 @@ export function useGenerateSurvey() {
       } catch (error) {
         // Network error or any other error - use mock data
         // This includes TypeError (network), SyntaxError (JSON parse), etc.
-        console.warn("AI Generation failed, using mock data:", error);
+        console.error("❌ AI Generation failed, using mock data:", error);
+        if (error instanceof TypeError && error.message.includes("fetch")) {
+          console.error("   This is a network error - the server may not be reachable");
+          // Show a more helpful error message
+          toast({ 
+            title: "Network error", 
+            description: "Could not reach the server. Using fallback data. Make sure the server is running on port 5000.",
+            variant: "default"
+          });
+        }
         return generateMockSurveyStructure(data);
       }
     },
     // No onError handler - we always return mock data on failure, so it's treated as success
     // This prevents error toasts from showing
+  });
+}
+
+/**
+ * Generate a survey plan using the external Anomaly backend (fast endpoint).
+ *
+ * This hook is intentionally strict:
+ * - It does NOT fall back to mock data.
+ * - If the backend is down / CORS blocked / response shape is different, we show a toast.
+ *
+ * Reason: When the user explicitly chooses the external backend, failures should be visible.
+ */
+export function useGenerateSurveyFast() {
+  const { toast } = useToast();
+
+  return useMutation({
+    mutationFn: async (data: GenerateSurveyRequest) => postSurveyPlanFast(data),
+    onError: (error) => {
+      // Provide more detailed error messages
+      let message = "An unknown error occurred";
+      if (error instanceof TypeError && error.message.includes("fetch")) {
+        message = "Failed to fetch: Could not reach the external backend. Check if the backend is running and the URL is correct.";
+      } else if (error instanceof Error) {
+        message = error.message;
+      } else {
+        message = String(error);
+      }
+      toast({ 
+        title: "Generation failed", 
+        description: message, 
+        variant: "destructive" 
+      });
+    },
   });
 }
 

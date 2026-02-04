@@ -49,6 +49,8 @@ export const generateSurveySchema = z.object({
   numQuestions: z.number().min(1).max(20).default(5),
   numPages: z.number().min(1).max(5).default(1),
   language: z.enum(["English", "Arabic", "Bilingual"]).default("English"),
+  title: z.string().optional(), // Survey title/name for external backend
+  type: z.string().optional(), // Survey type for external backend
 });
 
 export type GenerateSurveyRequest = z.infer<typeof generateSurveySchema>;

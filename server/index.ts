@@ -1,3 +1,32 @@
+// Load environment variables from .env file FIRST
+// This must happen before any other imports that might use process.env
+import "dotenv/config";
+import { config } from "dotenv";
+import { resolve } from "path";
+import { fileURLToPath } from "url";
+import { dirname } from "path";
+
+// Get the directory of the current file and resolve .env from project root
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+const envPath = resolve(__dirname, "..", ".env");
+
+// Explicitly load .env file to ensure it's loaded from the correct path
+// (dotenv/config already loaded it, but this ensures the path is correct)
+const envResult = config({ path: envPath, override: false });
+
+if (envResult.error) {
+  console.warn("⚠️  Could not load .env file:", envResult.error.message);
+} else {
+  const keyCount = Object.keys(envResult.parsed || {}).length;
+  if (keyCount > 0) {
+    console.log(`✅ Loaded ${keyCount} environment variable(s) from .env file`);
+  }
+  if (process.env.OPENAI_API_KEY || process.env.AI_INTEGRATIONS_OPENAI_API_KEY) {
+    console.log("✅ OpenAI API key detected");
+  }
+}
+
 import express, { type Request, Response, NextFunction } from "express";
 import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
@@ -21,6 +50,25 @@ app.use(
 );
 
 app.use(express.urlencoded({ extended: false }));
+
+// CORS middleware - allow requests from the same origin and handle preflight requests
+app.use((req, res, next) => {
+  // Allow requests from the same origin (localhost with any port)
+  const origin = req.headers.origin;
+  if (origin) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+  }
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  res.setHeader("Access-Control-Allow-Credentials", "true");
+  
+  // Handle preflight requests
+  if (req.method === "OPTIONS") {
+    return res.sendStatus(200);
+  }
+  
+  next();
+});
 
 export function log(message: string, source = "express") {
   const formattedTime = new Date().toLocaleTimeString("en-US", {

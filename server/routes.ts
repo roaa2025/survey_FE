@@ -9,29 +9,43 @@ import OpenAI from "openai";
 let openai: OpenAI | null = null;
 
 function initializeOpenAI() {
-  if (!process.env.AI_INTEGRATIONS_OPENAI_API_KEY) {
+  // Check for both AI_INTEGRATIONS_OPENAI_API_KEY and OPENAI_API_KEY
+  // This allows users to use either environment variable name
+  const apiKey = process.env.AI_INTEGRATIONS_OPENAI_API_KEY || process.env.OPENAI_API_KEY;
+  
+  // Debug: Log if API key is found (without exposing the full key)
+  if (apiKey) {
+    console.log("✅ OpenAI API key found:", apiKey.substring(0, 10) + "...");
+  } else {
     console.warn(
-      "⚠️  AI_INTEGRATIONS_OPENAI_API_KEY is not set. AI features will be unavailable.",
+      "⚠️  AI_INTEGRATIONS_OPENAI_API_KEY or OPENAI_API_KEY is not set. AI features will be unavailable.",
     );
+    // Debug: Show what environment variables are available
+    console.log("   Available env vars:", Object.keys(process.env).filter(k => k.includes("OPENAI") || k.includes("AI")).join(", ") || "none");
     return;
   }
 
   try {
     openai = new OpenAI({
-      apiKey: process.env.AI_INTEGRATIONS_OPENAI_API_KEY,
+      apiKey: apiKey,
       baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
     });
+    console.log("✅ OpenAI client initialized successfully");
   } catch (error) {
     console.warn("⚠️  Failed to initialize OpenAI client:", error);
   }
 }
 
-initializeOpenAI();
+// Don't initialize at module load time - wait until registerRoutes is called
+// This ensures dotenv has loaded the environment variables first
 
 export async function registerRoutes(
   httpServer: Server,
   app: Express
 ): Promise<Server> {
+  // Initialize OpenAI now that dotenv has loaded environment variables
+  initializeOpenAI();
+  
   // Register AI chat routes (optional but good for history/logging)
   registerChatRoutes(app);
 
@@ -70,9 +84,6 @@ export async function registerRoutes(
     try {
       const input = api.surveys.update.input.parse(req.body);
       const survey = await storage.updateSurvey(Number(req.params.id), input);
-      if (!survey) {
-        return res.status(404).json({ message: 'Survey not found' });
-      }
       res.json(survey);
     } catch (err) {
       if (err instanceof z.ZodError) {
@@ -81,20 +92,37 @@ export async function registerRoutes(
           field: err.errors[0].path.join('.'),
         });
       }
+      // Handle case where survey is not found
+      if (err instanceof Error && err.message.includes('not found')) {
+        return res.status(404).json({ message: 'Survey not found' });
+      }
       throw err;
     }
   });
 
   app.delete(api.surveys.delete.path, async (req, res) => {
-    await storage.deleteSurvey(Number(req.params.id));
-    res.status(204).send();
+    try {
+      await storage.deleteSurvey(Number(req.params.id));
+      res.status(204).send();
+    } catch (err) {
+      // Handle case where survey is not found
+      if (err instanceof Error && err.message.includes('not found')) {
+        return res.status(404).json({ message: 'Survey not found' });
+      }
+      throw err;
+    }
   });
 
   // === AI Generation Endpoints ===
+  
+  // Test endpoint to verify route is registered
+  console.log("✅ AI Generation endpoint registered at:", api.ai.generate.path);
 
   app.post(api.ai.generate.path, async (req, res) => {
+    console.log("📥 Received AI generation request");
     try {
       const { prompt, numQuestions, numPages, language } = api.ai.generate.input.parse(req.body);
+      console.log("📥 Request details:", { prompt: prompt?.substring(0, 50) + "...", numQuestions, numPages, language });
 
       // Construct a system prompt to guide the AI
       const systemPrompt = `You are an expert survey designer. 
@@ -124,7 +152,7 @@ export async function registerRoutes(
       }
 
       const response = await openai.chat.completions.create({
-        model: "gpt-5.1",
+        model: "gpt-4.1-mini",
         messages: [
           { role: "system", content: systemPrompt },
           { role: "user", content: prompt }
@@ -140,7 +168,13 @@ export async function registerRoutes(
 
     } catch (err) {
       console.error("AI Generation Error:", err);
-      res.status(500).json({ message: "Failed to generate survey structure" });
+      // Provide more detailed error information
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      const statusCode = err instanceof Error && 'status' in err ? (err as any).status : 500;
+      res.status(statusCode).json({ 
+        message: "Failed to generate survey structure",
+        error: errorMessage 
+      });
     }
   });
 
@@ -153,7 +187,7 @@ export async function registerRoutes(
       }
 
       const response = await openai.chat.completions.create({
-        model: "gpt-5.1",
+        model: "gpt-4.1-mini",
         messages: [
           { role: "system", content: "You are a professional editor. Rephrase the following survey prompt to be more clear, professional, and effective. Return JSON with 'rephrased' field." },
           { role: "user", content: `Language: ${language}\nPrompt: ${prompt}` }
@@ -172,7 +206,13 @@ export async function registerRoutes(
 
     } catch (err) {
       console.error("AI Rephrase Error:", err);
-      res.status(500).json({ message: "Failed to rephrase prompt" });
+      // Provide more detailed error information
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      const statusCode = err instanceof Error && 'status' in err ? (err as any).status : 500;
+      res.status(statusCode).json({ 
+        message: "Failed to rephrase prompt",
+        error: errorMessage 
+      });
     }
   });
 

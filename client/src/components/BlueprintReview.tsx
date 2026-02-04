@@ -10,6 +10,29 @@ interface BlueprintReviewProps {
 }
 
 export function BlueprintReview({ plan, onApprove, onRetry }: BlueprintReviewProps) {
+  // Safety check: ensure plan has sections
+  if (!plan || !plan.sections || !Array.isArray(plan.sections) || plan.sections.length === 0) {
+    console.error("BlueprintReview: Invalid plan structure", plan);
+    return (
+      <div className="space-y-6 animate-in fade-in duration-500">
+        <div className="bg-red-50 border border-red-200 rounded-xl p-6">
+          <h2 className="text-2xl font-display font-bold text-red-600 mb-2">
+            Invalid Plan Structure
+          </h2>
+          <p className="text-muted-foreground mb-4">
+            The generated plan does not have the expected structure. Please try regenerating.
+          </p>
+          <p className="text-xs text-muted-foreground font-mono bg-white p-2 rounded">
+            {JSON.stringify(plan, null, 2).substring(0, 500)}
+          </p>
+          <Button variant="outline" onClick={onRetry} className="gap-2 mt-4">
+            <RotateCcw className="w-4 h-4" /> Re-Generate
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-6 animate-in fade-in duration-500">
       <div className="bg-primary/5 border border-primary/20 rounded-xl p-6 mb-8 flex flex-col md:flex-row md:items-center justify-between gap-4">
