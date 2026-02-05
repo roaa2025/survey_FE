@@ -43,6 +43,21 @@ export const planPageSchema = z.object({
   question_specs: z.array(planQuestionSpecSchema),
 });
 
+// Plan rationale schema - explains the planning decisions
+// The summary field provides a brief explanation of the overall plan approach
+// Note: summary is optional to handle cases where older plans may not have it
+export const planRationaleSchema = z.object({
+  summary: z.string().optional(), // Brief explanation of overall plan approach
+  page_and_count_reasoning: z.array(z.string()).optional(), // Reasoning for page count decisions
+  question_type_reasoning: z.array(z.any()).optional(), // Reasoning for question type choices - can be string or { question_type: string; why: string }
+  assumptions: z.array(z.string()).optional(), // Assumptions made during planning
+  contextual_insights: z.object({
+    title: z.string().optional(), // Contextual insights about the survey title
+    type: z.string().optional(), // Contextual insights about the survey type
+    language: z.string().optional(), // Contextual insights about the survey language
+  }).optional(), // Additional contextual insights about the survey
+});
+
 // Plan structure from planner API
 export const planSchema = z.object({
   title: z.string(),
@@ -62,6 +77,8 @@ export const planSchema = z.object({
   final_number_of_pages: z.number().nullable().optional(),
   limits: z.record(z.any()).optional(),
   distribution: z.record(z.any()).optional(),
+  // Plan rationale - optional for backward compatibility with older plans
+  plan_rationale: planRationaleSchema.nullable().optional(),
 });
 
 // Meta information from API response
@@ -300,6 +317,7 @@ export function buildUrl(path: string, params?: Record<string, string | number>)
 // Type exports
 export type PlanQuestionSpec = z.infer<typeof planQuestionSpecSchema>;
 export type PlanPage = z.infer<typeof planPageSchema>;
+export type PlanRationale = z.infer<typeof planRationaleSchema>;
 export type Plan = z.infer<typeof planSchema>;
 export type SurveyPlanResponse = z.infer<typeof surveyPlanResponseSchema>;
 export type CreateSurveyPlanRequest = z.infer<typeof createSurveyPlanRequestSchema>;

@@ -815,6 +815,7 @@ export default function ConfigPage() {
                 onReject={isPlannerResponse(blueprint) && threadId ? handleBlueprintReject : undefined}
                 threadId={threadId || undefined}
                 isRejecting={rejectSurveyPlan.isPending}
+                isApproving={approveSurveyPlan.isPending}
               />
             )}
 

@@ -1,7 +1,7 @@
 import { useState } from "react";
-import { GenerateSurveyResponse, SurveyPlanResponse } from "@shared/routes";
+import { GenerateSurveyResponse, SurveyPlanResponse, PlanPage, PlanQuestionSpec } from "@shared/routes";
 import { Button } from "./ui/button";
-import { Check, Edit2, RotateCcw, Info, FileText, X } from "lucide-react";
+import { Check, Edit2, RotateCcw, Info, FileText, X, Loader2 } from "lucide-react";
 import { motion } from "framer-motion";
 import { Badge } from "./ui/badge";
 import {
@@ -29,6 +29,7 @@ interface BlueprintReviewProps {
   onReject?: (feedback: string) => void;
   threadId?: string;
   isRejecting?: boolean;
+  isApproving?: boolean;
 }
 
 /**
@@ -38,7 +39,7 @@ function isPlannerResponse(plan: GenerateSurveyResponse | SurveyPlanResponse): p
   return 'plan' in plan && 'approval_status' in plan && 'thread_id' in plan;
 }
 
-export function BlueprintReview({ plan, onApprove, onRetry, onReject, threadId, isRejecting = false }: BlueprintReviewProps) {
+export function BlueprintReview({ plan, onApprove, onRetry, onReject, threadId, isRejecting = false, isApproving = false }: BlueprintReviewProps) {
   // State for reject feedback dialog
   const [showRejectDialog, setShowRejectDialog] = useState(false);
   const [rejectFeedback, setRejectFeedback] = useState("");
@@ -65,7 +66,8 @@ export function BlueprintReview({ plan, onApprove, onRetry, onReject, threadId, 
   // Handle planner API response format
   if (isPlannerResponse(plan)) {
     const plannerPlan = plan;
-    const planData = plannerPlan.plan;
+    // Handle both normalized (plan.plan) and wrapped (plan.data.plan) response structures
+    const planData = plannerPlan.plan || (plannerPlan as any).data?.plan;
 
     // Safety check: ensure plan has pages
     if (!planData || !planData.pages || !Array.isArray(planData.pages) || planData.pages.length === 0) {
@@ -175,43 +177,199 @@ export function BlueprintReview({ plan, onApprove, onRetry, onReject, threadId, 
           </CardContent>
         </Card>
 
-        {/* Limits & Distribution (Collapsible) */}
-        {(planData.limits || planData.distribution) && (
-          <Accordion type="single" collapsible>
-            <AccordionItem value="limits-distribution">
-              <AccordionTrigger>
-                <div className="flex items-center gap-2">
-                  <Info className="w-4 h-4" /> Limits & Distribution
+        {/* Plan Rationale - Complete Planning Explanation */}
+        {planData.plan_rationale && (
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Info className="w-5 h-5" /> Planning Rationale
+              </CardTitle>
+              <CardDescription>
+                Detailed explanation of the planning decisions and approach
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-6">
+              {/* Summary Section - Combined: Summary text, Page and Count Reasoning, and Survey Context Insights */}
+              {(planData.plan_rationale.summary || 
+                (planData.plan_rationale.page_and_count_reasoning && planData.plan_rationale.page_and_count_reasoning.length > 0) ||
+                planData.plan_rationale.contextual_insights) && (
+                <div>
+                  <h4 className="font-semibold text-foreground mb-4">Summary</h4>
+                  <div className="space-y-4">
+                    {/* Summary text */}
+                    {planData.plan_rationale.summary && (
+                      <p className="text-base leading-relaxed text-foreground">
+                        {planData.plan_rationale.summary}
+                      </p>
+                    )}
+
+                    {/* Page and Count Reasoning */}
+                    {planData.plan_rationale.page_and_count_reasoning && 
+                     planData.plan_rationale.page_and_count_reasoning.length > 0 && (
+                      <div>
+                        <h5 className="font-medium text-foreground mb-2 text-sm">Page and Count Reasoning</h5>
+                        <ul className="space-y-2">
+                          {planData.plan_rationale.page_and_count_reasoning.map((reason: string, idx: number) => (
+                            <li key={idx} className="flex gap-2 text-foreground">
+                              <span className="text-primary mt-1">•</span>
+                              <span className="flex-1">{reason}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+
+                    {/* Survey Context Insights */}
+                    {planData.plan_rationale.contextual_insights && (
+                      <div>
+                        <h5 className="font-medium text-foreground mb-2 text-sm">Survey Context Insights</h5>
+                        <div className="space-y-2">
+                          {planData.plan_rationale.contextual_insights.title && (
+                            <div>
+                              <p className="text-sm font-medium text-muted-foreground">Title:</p>
+                              <p className="text-base text-foreground">{planData.plan_rationale.contextual_insights.title}</p>
+                            </div>
+                          )}
+                          {planData.plan_rationale.contextual_insights.type && (
+                            <div>
+                              <p className="text-sm font-medium text-muted-foreground">Type:</p>
+                              <p className="text-base text-foreground">{planData.plan_rationale.contextual_insights.type}</p>
+                            </div>
+                          )}
+                          {planData.plan_rationale.contextual_insights.language && (
+                            <div>
+                              <p className="text-sm font-medium text-muted-foreground">Language:</p>
+                              <p className="text-base text-foreground">{planData.plan_rationale.contextual_insights.language}</p>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                  </div>
                 </div>
-              </AccordionTrigger>
-              <AccordionContent>
-                <div className="space-y-4">
-                  {planData.limits && (
-                    <div>
-                      <h4 className="font-semibold mb-2">Limits</h4>
-                      <pre className="text-xs bg-muted p-3 rounded overflow-auto">
-                        {JSON.stringify(planData.limits, null, 2)}
-                      </pre>
-                    </div>
-                  )}
-                  {planData.distribution && (
-                    <div>
-                      <h4 className="font-semibold mb-2">Distribution</h4>
-                      <pre className="text-xs bg-muted p-3 rounded overflow-auto">
-                        {JSON.stringify(planData.distribution, null, 2)}
-                      </pre>
-                    </div>
-                  )}
+              )}
+
+              {/* Question Type Reasoning - Collapsible */}
+              {planData.plan_rationale.question_type_reasoning && 
+               Array.isArray(planData.plan_rationale.question_type_reasoning) &&
+               planData.plan_rationale.question_type_reasoning.length > 0 && (
+                <Accordion type="single" collapsible className="w-full">
+                  <AccordionItem value="question-type-reasoning" className="border-none">
+                    <AccordionTrigger className="py-2 hover:no-underline">
+                      <h4 className="font-semibold text-foreground">Question Type Reasoning</h4>
+                    </AccordionTrigger>
+                    <AccordionContent className="pt-2">
+                      <div className="space-y-3">
+                        {planData.plan_rationale.question_type_reasoning.map((reason: any, idx: number) => {
+                          // Check if reason is an object with question_type and why
+                          if (typeof reason === 'object' && reason !== null && 'question_type' in reason && 'why' in reason) {
+                            return (
+                              <div key={idx} className="bg-muted/50 rounded-lg p-4 border border-border">
+                                <div className="flex items-start gap-3">
+                                  <Badge variant="secondary" className="mt-0.5 flex-shrink-0 capitalize">
+                                    {reason.question_type}
+                                  </Badge>
+                                  <div className="flex-1">
+                                    <p className="text-foreground leading-relaxed">{reason.why}</p>
+                                  </div>
+                                </div>
+                              </div>
+                            );
+                          }
+                          // Fallback for string or other formats
+                          return (
+                            <div key={idx} className="flex gap-2 text-foreground">
+                              <span className="text-primary mt-1">•</span>
+                              <span className="flex-1">
+                                {typeof reason === 'string' ? reason : JSON.stringify(reason, null, 2)}
+                              </span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </AccordionContent>
+                  </AccordionItem>
+                </Accordion>
+              )}
+
+              {/* Assumptions */}
+              {planData.plan_rationale.assumptions && 
+               planData.plan_rationale.assumptions.length > 0 && (
+                <div>
+                  <h4 className="font-semibold text-foreground mb-2">Assumptions</h4>
+                  <ul className="space-y-2">
+                    {planData.plan_rationale.assumptions.map((assumption: string, idx: number) => (
+                      <li key={idx} className="flex gap-2 text-foreground">
+                        <span className="text-primary mt-1">•</span>
+                        <span className="flex-1">{assumption}</span>
+                      </li>
+                    ))}
+                  </ul>
                 </div>
-              </AccordionContent>
-            </AccordionItem>
-          </Accordion>
+              )}
+            </CardContent>
+          </Card>
+        )}
+
+        {/* Debug card: Show what data we have to help diagnose missing plan_rationale */}
+        {!planData.plan_rationale && (
+          // Debug card: Show what data we have to help diagnose missing plan_rationale
+          <Card className="border-yellow-200 bg-yellow-50/50">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2 text-yellow-800">
+                <Info className="w-5 h-5" /> Debug: Plan Rationale Status
+              </CardTitle>
+              <CardDescription className="text-yellow-700">
+                Checking if plan_rationale exists in the API response
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-2">
+              <div className="text-sm">
+                <p className="font-semibold text-yellow-900">Has plan_rationale:</p>
+                <p className="text-yellow-800 font-mono">
+                  {planData.plan_rationale ? "✅ YES" : "❌ NO"}
+                </p>
+              </div>
+              {planData.plan_rationale && (
+                <div className="text-sm">
+                  <p className="font-semibold text-yellow-900">Has summary:</p>
+                  <p className="text-yellow-800 font-mono">
+                    {planData.plan_rationale.summary ? "✅ YES" : "❌ NO"}
+                  </p>
+                </div>
+              )}
+              <div className="text-sm">
+                <p className="font-semibold text-yellow-900">Plan data keys:</p>
+                <p className="text-yellow-800 font-mono text-xs">
+                  {Object.keys(planData || {}).join(", ")}
+                </p>
+              </div>
+              {planData.plan_rationale && (
+                <div className="text-sm">
+                  <p className="font-semibold text-yellow-900">plan_rationale keys:</p>
+                  <p className="text-yellow-800 font-mono text-xs">
+                    {Object.keys(planData.plan_rationale).join(", ")}
+                  </p>
+                </div>
+              )}
+              <div className="mt-4 p-3 bg-white rounded border border-yellow-300">
+                <p className="text-xs font-semibold text-yellow-900 mb-2">Full plan_rationale object:</p>
+                <pre className="text-xs text-yellow-800 overflow-auto max-h-40">
+                  {JSON.stringify(planData.plan_rationale || "null", null, 2)}
+                </pre>
+              </div>
+              <p className="text-xs text-yellow-700 mt-2">
+                💡 If plan_rationale is missing, the backend API needs to include it in the response.
+                Check the browser console for full API response details.
+              </p>
+            </CardContent>
+          </Card>
         )}
 
         {/* Pages Structure */}
         <div className="space-y-6">
           <h3 className="text-xl font-bold text-secondary">Pages Structure</h3>
-          {planData.pages.map((page, pageIdx) => (
+          {planData.pages.map((page: PlanPage, pageIdx: number) => (
             <motion.div
               key={pageIdx}
               initial={{ opacity: 0, y: 20 }}
@@ -228,7 +386,7 @@ export function BlueprintReview({ plan, onApprove, onRetry, onReject, threadId, 
                 </span>
               </div>
               <div className="p-6 space-y-4">
-                {page.question_specs.map((spec, specIdx) => (
+                {page.question_specs.map((spec: PlanQuestionSpec, specIdx: number) => (
                   <div key={specIdx} className="flex gap-4 items-start group">
                     <div className="w-8 h-8 rounded-lg bg-primary/10 text-primary flex items-center justify-center flex-shrink-0 font-bold text-sm">
                       {specIdx + 1}
@@ -260,7 +418,7 @@ export function BlueprintReview({ plan, onApprove, onRetry, onReject, threadId, 
                       </div>
                       {spec.options_hint && spec.options_hint.length > 0 && (
                         <div className="mt-2 flex flex-wrap gap-1">
-                          {spec.options_hint.map((option, optIdx) => (
+                          {spec.options_hint.map((option: string, optIdx: number) => (
                             <Badge key={optIdx} variant="outline" className="text-xs">
                               {option}
                             </Badge>
@@ -297,9 +455,17 @@ export function BlueprintReview({ plan, onApprove, onRetry, onReject, threadId, 
           <Button 
             onClick={onApprove} 
             className="btn-primary gap-2"
-            disabled={plannerPlan.approval_status === "approved"}
+            disabled={plannerPlan.approval_status === "approved" || isApproving}
           >
-            <Check className="w-4 h-4" /> Approve Plan
+            {isApproving ? (
+              <>
+                <Loader2 className="w-4 h-4 animate-spin" /> Approving...
+              </>
+            ) : (
+              <>
+                <Check className="w-4 h-4" /> Approve Plan
+              </>
+            )}
           </Button>
         </div>
 
@@ -447,8 +613,20 @@ export function BlueprintReview({ plan, onApprove, onRetry, onReject, threadId, 
         <Button variant="outline" onClick={onRetry} className="gap-2">
           <RotateCcw className="w-4 h-4" /> Re-Generate
         </Button>
-        <Button onClick={onApprove} className="btn-primary gap-2">
-          <Check className="w-4 h-4" /> Approve plan
+        <Button 
+          onClick={onApprove} 
+          className="btn-primary gap-2"
+          disabled={isApproving}
+        >
+          {isApproving ? (
+            <>
+              <Loader2 className="w-4 h-4 animate-spin" /> Approving...
+            </>
+          ) : (
+            <>
+              <Check className="w-4 h-4" /> Approve plan
+            </>
+          )}
         </Button>
       </div>
     </div>
