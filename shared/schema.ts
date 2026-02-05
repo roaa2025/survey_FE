@@ -21,6 +21,12 @@ export const surveys = pgTable("surveys", {
         text: string;
         type: string;
         options?: string[];
+        // Metadata fields from planner API
+        spec_id?: string;
+        required?: boolean;
+        validation?: any;
+        skip_logic?: any;
+        scale?: any;
       }[];
     }[];
   }>(),

@@ -232,30 +232,27 @@ export default function ConfigPage() {
           throw new Error("The generated plan does not have the expected structure. Please try again.");
         }
 
-        if (reviewPlan) {
-          setBlueprint(plan);
-          setCurrentStep("blueprint");
-        } else {
-          // Direct save and proceed
-          try {
-            await updateSurvey.mutateAsync({ 
-              id: currentSurveyId, 
-              structure: plan 
-            });
-          } catch (updateError) {
-            // If update fails, continue anyway in frontend-only mode
-            console.warn("Survey update failed, continuing in frontend-only mode:", updateError);
-          }
-          // Store structure in localStorage as fallback for mock mode
-          if (currentSurveyId) {
-            try {
-              localStorage.setItem(`survey_${currentSurveyId}_structure`, JSON.stringify(plan));
-            } catch (e) {
-              console.warn("Failed to save to localStorage:", e);
-            }
-          }
-          setLocation(`/builder/${currentSurveyId}`);
+        // Fast mode (toggle OFF): Always skip blueprint review and go directly to builder
+        // Blueprint review is only available when toggle is ON (planner API mode)
+        // Direct save and proceed to builder
+        try {
+          await updateSurvey.mutateAsync({ 
+            id: currentSurveyId, 
+            structure: plan 
+          });
+        } catch (updateError) {
+          // If update fails, continue anyway in frontend-only mode
+          console.warn("Survey update failed, continuing in frontend-only mode:", updateError);
         }
+        // Store structure in localStorage as fallback for mock mode
+        if (currentSurveyId) {
+          try {
+            localStorage.setItem(`survey_${currentSurveyId}_structure`, JSON.stringify(plan));
+          } catch (e) {
+            console.warn("Failed to save to localStorage:", e);
+          }
+        }
+        setLocation(`/builder/${currentSurveyId}`);
       }
     } catch (err) {
       // Error handled by hook toast
@@ -318,9 +315,11 @@ export default function ConfigPage() {
         setBlueprint(approvedPlan);
 
         // Call generate-validate-fix endpoint after approval succeeds
+        // This endpoint returns the actual rendered questions with full text, options, validation, etc.
+        let generateResult: Awaited<ReturnType<typeof generateValidateFixQuestions>> | null = null;
         try {
           console.log("🔵 Calling generate-validate-fix endpoint...", threadId);
-          const generateResult = await generateValidateFixQuestions(threadId, true);
+          generateResult = await generateValidateFixQuestions(threadId, true);
           console.log("✅ Generate-validate-fix completed:", generateResult);
           
           // Log validation results if available
@@ -348,18 +347,129 @@ export default function ConfigPage() {
           // Continue with the flow even if generate-validate-fix fails
         }
 
-        // Transform planner response to sections format for backward compatibility
-        const transformedPlan = {
-          sections: approvedPlan.plan.pages.map((page, idx) => ({
-            title: page.name || `Section ${idx + 1}`,
-            questions: page.question_specs.map((spec) => ({
-              text: spec.intent,
-              type: spec.question_type,
-              options: spec.options_hint && spec.options_hint.length > 0 ? spec.options_hint : undefined,
-            })),
-          })),
-          suggestedName: approvedPlan.plan.title,
+        // Transform to sections format for backward compatibility
+        // Priority order:
+        // 1. rendered_pages from generate-validate-fix (validated and fixed questions with full metadata)
+        // 2. generated_questions from approved plan (actual questions generated during approval)
+        // 3. Original plan structure (only has intent and options_hint)
+        
+        // Helper to convert generated_questions to sections format
+        // Backend returns: { generated_questions: { rendered_pages: [...] } }
+        const convertGeneratedQuestionsToSections = (generatedQuestions: any): { sections: any[], suggestedName: string } | null => {
+          if (!generatedQuestions || typeof generatedQuestions !== 'object') return null;
+          
+          try {
+            // Check if generated_questions has rendered_pages array (new format)
+            if (generatedQuestions.rendered_pages && Array.isArray(generatedQuestions.rendered_pages)) {
+              const sections = generatedQuestions.rendered_pages.map((page: any, idx: number) => {
+                const pageName = page.name || page.title || `Section ${idx + 1}`;
+                const questions = Array.isArray(page.questions) ? page.questions : [];
+                
+                return {
+                  title: pageName,
+                  questions: questions.map((q: any) => ({
+                    text: q.question_text || q.text || q.intent || '',
+                    type: q.question_type || q.type || 'text',
+                    options: (q.options && Array.isArray(q.options) && q.options.length > 0) ? q.options : undefined,
+                    required: q.required !== undefined ? q.required : undefined,
+                    spec_id: q.spec_id || undefined,
+                    scale: q.scale || undefined,
+                    validation: q.validation || undefined,
+                    skip_logic: q.skip_logic || undefined,
+                  })),
+                };
+              });
+              
+              return { sections, suggestedName: approvedPlan.plan.title };
+            }
+            
+            // Fallback: try treating generated_questions as a record (old format)
+            // where keys are page IDs and values are page objects with questions
+            const pages = Object.values(generatedQuestions) as any[];
+            if (Array.isArray(pages) && pages.length > 0 && pages[0]?.questions) {
+              const sections = pages.map((page: any, idx: number) => {
+                const pageName = page.name || page.title || `Section ${idx + 1}`;
+                const questions = Array.isArray(page.questions) ? page.questions : [];
+                
+                return {
+                  title: pageName,
+                  questions: questions.map((q: any) => ({
+                    text: q.question_text || q.text || q.intent || '',
+                    type: q.question_type || q.type || 'text',
+                    options: (q.options && Array.isArray(q.options) && q.options.length > 0) ? q.options : undefined,
+                    required: q.required !== undefined ? q.required : undefined,
+                    spec_id: q.spec_id || undefined,
+                    scale: q.scale || undefined,
+                    validation: q.validation || undefined,
+                    skip_logic: q.skip_logic || undefined,
+                  })),
+                };
+              });
+              
+              return { sections, suggestedName: approvedPlan.plan.title };
+            }
+            
+            return null;
+          } catch (error) {
+            console.warn("Failed to convert generated_questions to sections:", error);
+            return null;
+          }
         };
+        
+        let transformedPlan;
+        if (generateResult?.rendered_pages) {
+          // Use rendered_pages: contains actual question_text, full options array, validation, skip_logic, etc.
+          transformedPlan = {
+            sections: generateResult.rendered_pages.map((page, idx) => ({
+              title: page.name || `Section ${idx + 1}`,
+              questions: page.questions.map((question) => ({
+                text: question.question_text, // Use actual rendered question text
+                type: question.question_type,
+                options: question.options && question.options.length > 0 ? question.options : undefined,
+                required: question.required,
+                // Include additional metadata fields: spec_id, scale, validation, skip_logic
+                spec_id: question.spec_id || undefined,
+                scale: question.scale || undefined,
+                validation: question.validation || undefined,
+                skip_logic: question.skip_logic || undefined,
+              })),
+            })),
+            suggestedName: approvedPlan.plan.title,
+          };
+        } else if (approvedPlan.generated_questions) {
+          // Use generated_questions from approved plan (actual questions generated during approval)
+          const converted = convertGeneratedQuestionsToSections(approvedPlan.generated_questions);
+          if (converted) {
+            transformedPlan = converted;
+            console.log("✅ Using generated_questions from approved plan");
+          } else {
+            // Fallback to original plan structure
+            transformedPlan = {
+              sections: approvedPlan.plan.pages.map((page, idx) => ({
+                title: page.name || `Section ${idx + 1}`,
+                questions: page.question_specs.map((spec) => ({
+                  text: spec.intent,
+                  type: spec.question_type,
+                  options: spec.options_hint && spec.options_hint.length > 0 ? spec.options_hint : undefined,
+                })),
+              })),
+              suggestedName: approvedPlan.plan.title,
+            };
+          }
+        } else {
+          // Fallback to original plan structure (only has intent and options_hint)
+          transformedPlan = {
+            sections: approvedPlan.plan.pages.map((page, idx) => ({
+              title: page.name || `Section ${idx + 1}`,
+              questions: page.question_specs.map((spec) => ({
+                text: spec.intent,
+                type: spec.question_type,
+                options: spec.options_hint && spec.options_hint.length > 0 ? spec.options_hint : undefined,
+              })),
+            })),
+            suggestedName: approvedPlan.plan.title,
+          };
+        }
 
         // Save to survey structure
         try {
@@ -619,67 +729,65 @@ export default function ConfigPage() {
                   </p>
                 </div>
 
-                <div className="grid md:grid-cols-12 gap-8">
-                  <div className="md:col-span-8 space-y-6">
-                    {/* Prompt Input */}
-                    <div className="space-y-3">
-                      <label className="text-lg font-semibold text-secondary flex justify-between items-center">
-                        Prompt Description
-                        <Button 
-                          variant="ghost" 
-                          size="sm" 
-                          className="text-primary hover:text-primary/80 hover:bg-primary/5"
-                          onClick={handleRephraseClick}
-                          // Smart rephrase uses the built-in AI flow.
-                          // When the toggle is OFF, we are using the external backend and we disable this.
-                          disabled={!isPromptEnabled || !aiPrompt.trim() || rephrasePrompt.isPending}
-                        >
-                          <RefreshCw className={`w-4 h-4 mr-2 ${rephrasePrompt.isPending ? 'animate-spin' : ''}`} /> 
-                          {rephrasePrompt.isPending ? 'Rephrasing...' : 'Smart Rephrase'}
-                        </Button>
-                      </label>
-                      {/* Textarea container with toggle inside */}
-                      <div className="relative">
-                        <Textarea 
-                          placeholder="e.g. Create a customer satisfaction survey for a luxury hotel chain focusing on check-in experience, room cleanliness, and dining options." 
-                          className="min-h-[160px] text-lg p-6 rounded-xl border-border bg-white shadow-sm resize-none focus:ring-2 focus:ring-primary/20"
-                          value={aiPrompt}
-                          onChange={(e) => setAiPrompt(e.target.value)}
-                        />
-                        {/* Toggle switch positioned inside textarea area at the bottom */}
-                        <div className="absolute bottom-4 right-4">
-                          <Switch
-                            checked={isPromptEnabled}
-                            onCheckedChange={setIsPromptEnabled}
-                            id="prompt-toggle"
-                          />
-                        </div>
+                <div className="space-y-6">
+                  {/* Example Prompts - Moved to top */}
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    {[
+                      "Employee engagement survey for tech startup",
+                      "Post-event feedback for a medical conference",
+                      "Product market fit for new coffee brand"
+                    ].map((example) => (
+                      <div 
+                        key={example}
+                        onClick={() => setAiPrompt(example)}
+                        className="bg-white p-3 rounded-lg border border-dashed border-border hover:border-primary/50 cursor-pointer text-sm text-muted-foreground hover:text-primary hover:bg-primary/5 transition-colors flex items-center gap-2"
+                      >
+                        <Lightbulb className="w-4 h-4 flex-shrink-0" />
+                        {example}
                       </div>
-                    </div>
+                    ))}
+                  </div>
 
-                    {/* Example Prompts */}
-                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                      {[
-                        "Employee engagement survey for tech startup",
-                        "Post-event feedback for a medical conference",
-                        "Product market fit for new coffee brand"
-                      ].map((example) => (
-                        <div 
-                          key={example}
-                          onClick={() => setAiPrompt(example)}
-                          className="bg-white p-3 rounded-lg border border-dashed border-border hover:border-primary/50 cursor-pointer text-sm text-muted-foreground hover:text-primary hover:bg-primary/5 transition-colors flex items-center gap-2"
-                        >
-                          <Lightbulb className="w-4 h-4 flex-shrink-0" />
-                          {example}
-                        </div>
-                      ))}
+                  {/* Prompt Input */}
+                  <div className="space-y-3">
+                    <label className="text-lg font-semibold text-secondary flex justify-between items-center">
+                      Prompt Description
+                      <Button 
+                        variant="ghost" 
+                        size="sm" 
+                        className="text-primary hover:text-primary/80 hover:bg-primary/5"
+                        onClick={handleRephraseClick}
+                        // Smart rephrase uses the built-in AI flow.
+                        // When the toggle is OFF, we are using the external backend and we disable this.
+                        disabled={!isPromptEnabled || !aiPrompt.trim() || rephrasePrompt.isPending}
+                      >
+                        <RefreshCw className={`w-4 h-4 mr-2 ${rephrasePrompt.isPending ? 'animate-spin' : ''}`} /> 
+                        {rephrasePrompt.isPending ? 'Rephrasing...' : 'Smart Rephrase'}
+                      </Button>
+                    </label>
+                    {/* Textarea container with toggle inside */}
+                    <div className="relative">
+                      <Textarea 
+                        placeholder="e.g. Create a customer satisfaction survey for a luxury hotel chain focusing on check-in experience, room cleanliness, and dining options." 
+                        className="min-h-[160px] text-lg p-6 rounded-xl border-border bg-white shadow-sm resize-none focus:ring-2 focus:ring-primary/20"
+                        value={aiPrompt}
+                        onChange={(e) => setAiPrompt(e.target.value)}
+                      />
+                      {/* Toggle switch positioned inside textarea area at the bottom */}
+                      <div className="absolute bottom-4 right-4">
+                        <Switch
+                          checked={isPromptEnabled}
+                          onCheckedChange={setIsPromptEnabled}
+                          id="prompt-toggle"
+                        />
+                      </div>
                     </div>
                   </div>
 
-                  {/* Sidebar Controls */}
-                  <div className="md:col-span-4 space-y-6 relative z-10">
+                  {/* Generate Button - Now positioned below the textarea */}
+                  <div className="relative z-10">
                     <Button 
-                      className="w-full btn-primary py-6 text-lg shadow-xl shadow-primary/20 cursor-pointer relative z-10" 
+                      className="w-full btn-primary py-3 text-base shadow-md shadow-primary/20 cursor-pointer relative z-10" 
                       onClick={handleGenerate}
                       disabled={
                         (isPromptEnabled ? createSurveyPlan.isPending : generateSurveyFast.isPending) ||
@@ -690,7 +798,7 @@ export default function ConfigPage() {
                       {(isPromptEnabled ? createSurveyPlan.isPending : generateSurveyFast.isPending) ? (
                         <>Generating <span className="animate-pulse">...</span></>
                       ) : (
-                        <>Generate <Wand2 className="ml-2 w-5 h-5" /></>
+                        <>Generate <Wand2 className="ml-2 w-4 h-4" /></>
                       )}
                     </Button>
                   </div>

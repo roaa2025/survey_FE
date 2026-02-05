@@ -46,6 +46,8 @@ function toggleAnomalyPrefix(baseUrl: string) {
  * - { plan: { sections: [...] } }
  * - { data: { sections: [...] } }
  * - { sections: [...] } (direct)
+ * - { rendered_pages: [...] } (planner API format - needs conversion)
+ * - { generated_questions: {...} } (planner API format - needs conversion)
  */
 function extractPlanCandidate(raw: unknown): unknown {
   if (!raw || typeof raw !== "object") return raw;
@@ -57,12 +59,95 @@ function extractPlanCandidate(raw: unknown): unknown {
     return r;
   }
   
+  // Handle rendered_pages format from planner API (convert to sections)
+  if (r.rendered_pages && Array.isArray(r.rendered_pages)) {
+    return {
+      sections: r.rendered_pages.map((page: any) => ({
+        title: page.name || `Page ${page.page_number || ''}`,
+        questions: (page.questions || []).map((q: any) => ({
+          text: q.question_text || q.text || '',
+          type: q.question_type || q.type || 'text',
+          options: q.options && Array.isArray(q.options) && q.options.length > 0 ? q.options : undefined,
+          required: q.required,
+          spec_id: q.spec_id,
+          scale: q.scale,
+          validation: q.validation,
+          skip_logic: q.skip_logic,
+        })),
+      })),
+      suggestedName: r.suggestedName || r.name,
+    };
+  }
+  
+  // Handle generated_questions format from planner API (convert to sections)
+  // Backend returns: { generated_questions: { rendered_pages: [...] } }
+  if (r.generated_questions && typeof r.generated_questions === 'object') {
+    // Check if generated_questions has rendered_pages array (new format)
+    if (r.generated_questions.rendered_pages && Array.isArray(r.generated_questions.rendered_pages)) {
+      return {
+        sections: r.generated_questions.rendered_pages.map((page: any, idx: number) => ({
+          title: page.name || page.title || `Section ${idx + 1}`,
+          questions: (Array.isArray(page.questions) ? page.questions : []).map((q: any) => ({
+            text: q.question_text || q.text || q.intent || '',
+            type: q.question_type || q.type || 'text',
+            options: (q.options && Array.isArray(q.options) && q.options.length > 0) ? q.options : undefined,
+            required: q.required !== undefined ? q.required : undefined,
+            spec_id: q.spec_id,
+            scale: q.scale || undefined,
+            validation: q.validation || undefined,
+            skip_logic: q.skip_logic || undefined,
+          })),
+        })),
+        suggestedName: r.suggestedName || r.name || r.plan?.title,
+      };
+    }
+    // Fallback: try treating generated_questions as a record (old format)
+    const pages = Object.values(r.generated_questions) as any[];
+    if (Array.isArray(pages) && pages.length > 0 && pages[0]?.questions) {
+      return {
+        sections: pages.map((page: any, idx: number) => ({
+          title: page.name || page.title || `Section ${idx + 1}`,
+          questions: (Array.isArray(page.questions) ? page.questions : []).map((q: any) => ({
+            text: q.question_text || q.text || q.intent || '',
+            type: q.question_type || q.type || 'text',
+            options: (q.options && Array.isArray(q.options) && q.options.length > 0) ? q.options : undefined,
+            required: q.required !== undefined ? q.required : undefined,
+            spec_id: q.spec_id,
+            scale: q.scale || undefined,
+            validation: q.validation || undefined,
+            skip_logic: q.skip_logic || undefined,
+          })),
+        })),
+        suggestedName: r.suggestedName || r.name,
+      };
+    }
+  }
+  
   // Try nested structures (common in FastAPI responses)
   if (r.survey_plan?.sections && Array.isArray(r.survey_plan.sections)) {
     return r.survey_plan;
   }
   if (r.surveyPlan?.sections && Array.isArray(r.surveyPlan.sections)) {
     return r.surveyPlan;
+  }
+  // Handle plan.pages format (planner API format with question_specs)
+  if (r.plan?.pages && Array.isArray(r.plan.pages)) {
+    return {
+      sections: r.plan.pages.map((page: any, idx: number) => ({
+        title: page.name || page.title || `Section ${idx + 1}`,
+        questions: (page.question_specs || []).map((spec: any) => ({
+          text: spec.intent || spec.question_text || spec.text || '',
+          type: spec.question_type || spec.type || 'text',
+          options: (spec.options_hint && Array.isArray(spec.options_hint) && spec.options_hint.length > 0) ? spec.options_hint : undefined,
+          required: spec.required !== undefined ? spec.required : undefined,
+          spec_id: spec.spec_id,
+          validation: spec.validation || undefined,
+          skip_logic: spec.skip_logic || undefined,
+          scale: spec.scale || undefined,
+        })),
+      })),
+      suggestedName: r.plan.title || r.suggestedName || r.name,
+    };
   }
   if (r.plan?.sections && Array.isArray(r.plan.sections)) {
     return r.plan;
@@ -72,6 +157,21 @@ function extractPlanCandidate(raw: unknown): unknown {
   }
   if (r.result?.sections && Array.isArray(r.result.sections)) {
     return r.result;
+  }
+  
+  // Try nested rendered_pages
+  if (r.data?.rendered_pages && Array.isArray(r.data.rendered_pages)) {
+    return extractPlanCandidate({ rendered_pages: r.data.rendered_pages, suggestedName: r.data.suggestedName || r.data.name });
+  }
+  
+  // Try nested generated_questions in data wrapper
+  if (r.data?.generated_questions && typeof r.data.generated_questions === 'object') {
+    if (r.data.generated_questions.rendered_pages && Array.isArray(r.data.generated_questions.rendered_pages)) {
+      return extractPlanCandidate({ 
+        generated_questions: r.data.generated_questions,
+        suggestedName: r.data.suggestedName || r.data.name || r.plan?.title
+      });
+    }
   }
   
   // If we have questions but no sections, try to construct sections

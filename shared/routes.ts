@@ -221,8 +221,16 @@ export const api = {
             title: z.string(),
             questions: z.array(z.object({
               text: z.string(),
-              type: z.enum(["rating", "text", "choice"]),
-              options: z.array(z.string()).optional()
+              // Accept any question type string (scale, radio, checkbox, star_rating, text_area, etc.)
+              // This matches what the backend returns and what the database schema stores
+              type: z.string(),
+              options: z.array(z.string()).optional(),
+              // Metadata fields from planner API (optional to maintain backward compatibility)
+              spec_id: z.string().optional(),
+              required: z.boolean().optional(),
+              validation: z.record(z.any()).optional(),
+              skip_logic: z.record(z.any()).optional(),
+              scale: z.record(z.any()).optional()
             }))
           })),
           suggestedName: z.string().optional()

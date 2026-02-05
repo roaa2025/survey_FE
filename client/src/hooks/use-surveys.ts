@@ -622,11 +622,22 @@ export function useApproveSurveyPlan() {
       }
     },
     onSuccess: (data) => {
-      const totalQuestions = data.generated_questions 
-        ? Object.values(data.generated_questions).reduce((acc: number, page: any) => {
+      // Count questions from generated_questions.rendered_pages (new format)
+      // or fallback to treating generated_questions as a record (old format)
+      let totalQuestions = 0;
+      if (data.generated_questions) {
+        if (data.generated_questions.rendered_pages && Array.isArray(data.generated_questions.rendered_pages)) {
+          // New format: generated_questions.rendered_pages
+          totalQuestions = data.generated_questions.rendered_pages.reduce((acc: number, page: any) => {
             return acc + (Array.isArray(page.questions) ? page.questions.length : 0);
-          }, 0)
-        : 0;
+          }, 0);
+        } else {
+          // Old format: generated_questions as a record
+          totalQuestions = Object.values(data.generated_questions).reduce((acc: number, page: any) => {
+            return acc + (Array.isArray(page.questions) ? page.questions.length : 0);
+          }, 0);
+        }
+      }
       
       toast({
         title: "Plan approved",
